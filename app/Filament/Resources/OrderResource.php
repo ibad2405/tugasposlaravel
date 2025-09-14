@@ -5,7 +5,9 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\OrderResource\Pages;
 use App\Filament\Resources\OrderResource\RelationManagers;
 use App\Models\Order;
+use App\Models\PaymentMethod;
 use App\Models\Product;
+use App\Models\Variable;
 use Filament\Forms;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Form;
@@ -22,51 +24,100 @@ class OrderResource extends Resource
 
     protected static ?string $navigationIcon = 'heroicon-o-shopping-cart';
 
+    protected static ?int $navigationSort = 3;
+
     public static function form(Form $form): Form
     {
         return $form
             ->schema([
-                Forms\Components\Group::make()
-                    ->schema([
+              
                         Forms\Components\Section::make('Customer Information')
                         ->schema([
+                            Forms\Components\Grid::make(2) // biar name & phone sejajar
+                    ->schema([
                             Forms\Components\TextInput::make('name')
                                 ->required()
                                 ->maxLength(255),
                             Forms\Components\TextInput::make('phone')
                                 ->tel()
                                 ->maxLength(255),
-                        ])
                     ]),
-                Forms\Components\Group::make()
+                        ]),
+                    
+               
+                Forms\Components\Section::make('Order Products')
+                    ->schema([
+                        self::getItemsRepeater(),
+                    ]),
+                
+                 Forms\Components\Group::make()
                     ->schema([
                         Forms\Components\Section::make('Payment & Notes')
                         ->schema([
                             Forms\Components\Select::make('payment_method_id')
                                 ->label('Payment Methods')
+                                ->reactive()
                                 ->relationship('paymentMethod', 'name')
-                                ->default(null)
-                                ->required(),
+                                ->afterStateUpdated(function($state, Forms\Set $set, Forms\Get $get){
+                                    $paymentMethod = PaymentMethod::find($state);
+                                    $set('is_cash', $paymentMethod?->is_cash??false);
+
+                                    if(!$paymentMethod->is_cash){
+                                        $set('change_amount', 0);
+                                        $set('paid_amount', $get('total_price'));
+                                    }
+
+                                    
+                                })
+                                ->afterStateHydrated(function (Forms\Set $set, Forms\Get $get, $state){
+                                    $paymentMethod = PaymentMethod::find($state);
+                                    if(!$paymentMethod?->is_cash){
+                                        $set('paid_amount', $get('total_price'));
+                                        $set('change_amount', 0);
+                                    }
+                                    $set('is_cash', $paymentMethod?->is_cash??false); 
+                                }),
+                            Forms\Components\Hidden::make('is_cash')
+                                ->dehydrated(), 
                             Forms\Components\Textarea::make('note')
                                 // ->columnSpanFull()
                                 ->rows(1),                            
                         ])
                     ]),
-                Forms\Components\Section::make('Order Products')
+                Forms\Components\Group::make()
                     ->schema([
-                        self::getItemsRepeater(),
-                    ]),
-                Forms\Components\TextInput::make('total_price')
-                    ->required()
-                    ->readOnly()
-                    ->numeric(),
+                        Forms\Components\Section::make('Total')
+                        ->schema([
+                            Forms\Components\Grid::make(2)
+                            ->schema([
+                                Forms\Components\TextInput::make('tax')
+                                    ->label(function () {
+                                        $taxRate = Variable::where('name', 'tax_rate')->value('value') ?? 0;
+                                        return "Tax (VAT {$taxRate}%)";
+                                    })
+                                    ->numeric()
+                                    ->readOnly(),
+                                Forms\Components\TextInput::make('total_price')
+                                    ->required()
+                                    ->readOnly()
+                                    ->numeric(),
+                                ]),
+                Forms\Components\Grid::make(2)
+                            ->schema([
                 Forms\Components\TextInput::make('paid_amount')
-                    ->numeric()
-                    ->default(null),
+                    ->reactive()
+                    ->readOnly(fn(Forms\Get $get) => $get('is_cash') == false)
+                    ->afterStateUpdated(function(Forms\Get $get, Forms\Set $set, $state){
+                        //menghitung uang kembalian
+                        self::updateExchangePaid($get, $set);
+                    }),
                 Forms\Components\TextInput::make('change_amount')
                     ->numeric()
-                    ->default(null),
-            ]);
+                    ->readOnly(),
+                ]),
+            ])
+            ])
+                ]);
     }
 
     public static function table(Table $table): Table
@@ -103,7 +154,9 @@ class OrderResource extends Resource
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
-            ]);
+                Tables\Actions\ViewAction::make(),
+            ])
+            ->defaultSort('created_at', 'desc');
             // ->bulkActions([
             //     Tables\Actions\BulkActionGroup::make([
             //         Tables\Actions\DeleteBulkAction::make(),
@@ -209,7 +262,17 @@ class OrderResource extends Resource
             return $total + ($prices[$product['product_id']] * $product['quantity']);
         }, 0);
 
-        $set('total_price', $total);
+        $taxRate = (float) Variable::where('name', 'tax_rate')->value('value') ?? 0;
+        $tax = ($total * $taxRate) / 100;
+        $set('tax', $tax);
+        $set('total_price', $total + $tax);
     }
 
+    protected static function updateExchangePaid(Forms\Get $get, Forms\Set $set) : void
+    {
+        $paidAmount = (int) $get('paid_amount') ;
+        $totalprice = (int) $get('total_price') ;
+        $exchangePaid = $paidAmount - $totalprice;
+        $set('change_amount', max(0, $exchangePaid));
+    }
 }
